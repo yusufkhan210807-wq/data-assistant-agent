@@ -1,10 +1,13 @@
 import os
 import io
+import re
 import sys
 import time
 import contextlib
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import streamlit as st
 from groq import Groq, RateLimitError
 
@@ -70,7 +73,6 @@ st.markdown("""
         font-weight: 800 !important; 
         font-family: 'Montserrat', sans-serif !important; 
     }
-    /* Target the SVG icon directly to stop it from going black */
     div[data-testid="stPopover"] > button svg {
         fill: #8C6246 !important;
         color: #8C6246 !important;
@@ -99,9 +101,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Helper function to render custom trace messages
 def trace_msg(text, msg_type="info"):
     return f'<div class="trace-box trace-{msg_type}">{text}</div>'
+
+def extract_python_code(text: str) -> str:
+    match = re.search(r"```(?:python)?\s*(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.replace("```python", "").replace("```", "").strip()
 
 # ---------------------------------------------------------
 # Sidebar: Setup & File Management
@@ -114,7 +121,6 @@ with st.sidebar:
     st.markdown("#### Dataset Selector")
     uploaded_file_sidebar = st.file_uploader("Upload CSV", type=["csv"], key="sidebar_upload")
     
-    # Placeholder for the new Active File card
     active_file_placeholder = st.empty()
 
 # ---------------------------------------------------------
@@ -140,11 +146,11 @@ def extract_schema_profile(data: pd.DataFrame) -> str:
     data.info(buf=buf)
     
     try:
-        sample_rows = data.head(3).to_markdown()
+        sample_rows = data.head(5).to_markdown()
     except ImportError:
-        sample_rows = data.head(3).to_string()
+        sample_rows = data.head(5).to_string()
         
-    return f"Columns & Inferred Types:\n{buf.getvalue()}\n\nFirst 3 Records:\n{sample_rows}"
+    return f"Exact Column Names: {list(data.columns)}\n\nColumns & Inferred Types:\n{buf.getvalue()}\n\nFirst 5 Records:\n{sample_rows}"
 
 # ---------------------------------------------------------
 # Header & Execution Trace (Top Section)
@@ -161,7 +167,6 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ---------------------------------------------------------
 st.markdown("**Enter your analytical question or task:**")
 
-# Using column layout with collapsed labels for perfect horizontal alignment
 col_btn, col_prompt, col_exec = st.columns([1, 7, 2])
 
 with col_btn:
@@ -177,10 +182,8 @@ with col_exec:
 # ---------------------------------------------------------
 # Resolve Active Dataset & Render Sidebar Sync Card
 # ---------------------------------------------------------
-# Main UI takes priority over Sidebar if both have files
 uploaded_file = uploaded_file_main or uploaded_file_sidebar
 
-# Dynamically render a bold card in the sidebar reflecting the current file
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
     active_file_placeholder.markdown(f"""
@@ -210,7 +213,7 @@ if run_pressed:
         
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        st.error("Please provide a Groq API Key via the 'GROQ_API_KEY' environment variable in your terminal.")
+        st.error("Please provide a Groq API Key via the 'GROQ_API_KEY' environment variable or Streamlit Secrets.")
         st.stop()
         
     client = Groq(api_key=api_key)
@@ -241,28 +244,29 @@ if run_pressed:
         
         error_context = ""
         if error_trace:
-            error_context = f"\nCRITICAL: Your previous code crashed with this traceback:\n{error_trace}\nIdentify the root cause (e.g. data type conversions, currency symbols, missing columns) and fix it completely."
+            error_context = f"\nCRITICAL: Your previous code crashed with this traceback:\n{error_trace}\nFix the root cause completely. Remember: `df` is ALREADY loaded in memory. Do NOT call `pd.read_csv()`."
 
-        prompt = f"""You are an elite data scientist and Python programmer working on a pandas DataFrame named `df`.
+        prompt = f"""You are an elite data scientist and Python programmer working on a pandas DataFrame named `df` that is ALREADY loaded in memory.
 Dataset Schema & Sample:
 {schema_summary}
 
 User Task: "{user_query}"
 {error_context}
 
-Instructions:
-1. Write clean, robust Python code to answer the query.
-2. Clean column values if necessary (e.g., stripping '$' or whitespace before math aggregations).
-3. Store the final textual summary or table in a variable named `result`.
-4. If a visualization answers or clarifies the question, generate a clean Matplotlib plot and save it to '{generated_chart_path}'. Do NOT call plt.show().
-5. Output ONLY the raw executable Python code enclosed in ```python and ``` backticks. No conversational filler.
-6. AESTHETIC REQUIREMENT: If you generate a chart, you MUST use shades of brown for the colors (e.g., '#8C6246', '#D7C0A8', '#5C4033') to match the UI theme."""
+STRICT INSTRUCTIONS:
+1. NEVER call `pd.read_csv()` or load any external file. The data is ALREADY in the variable `df`.
+2. Clean non-numeric or missing values (like 'Absent', '$', commas) using `pd.to_numeric(..., errors='coerce')` before math operations.
+3. Store the final formatted textual summary (or dictionary/DataFrame of all requested metrics) in a variable named `result`, AND also `print(result)`.
+4. If a visualization is requested or helpful, create it using `matplotlib.pyplot as plt` or `seaborn as sns` and save it to '{generated_chart_path}' using `plt.savefig('{generated_chart_path}', bbox_inches='tight')` followed by `plt.close()`. Do NOT call `plt.show()`.
+5. AESTHETIC REQUIREMENT: Use shades of brown for any charts (e.g., '#8C6246', '#D7C0A8', '#5C4033').
+6. Output ONLY raw, valid, complete Python code inside ```python and ``` backticks. Keep the code concise so all brackets and quotes are properly closed."""
 
         try:
             response = client.chat.completions.create(
                 messages=[{"role": "system", "content": prompt}],
                 model=llama_model,
-                temperature=0.0
+                temperature=0.0,
+                max_tokens=2048
             )
             raw_code = response.choices[0].message.content
         except RateLimitError:
@@ -272,22 +276,25 @@ Instructions:
             response = client.chat.completions.create(
                 messages=[{"role": "system", "content": prompt}],
                 model=llama_model,
-                temperature=0.0
+                temperature=0.0,
+                max_tokens=2048
             )
             raw_code = response.choices[0].message.content
 
-        code_to_run = raw_code.replace("```python", "").replace("```", "").strip()
+        code_to_run = extract_python_code(raw_code)
         
-        # Sandboxed Execution Tool
+        # Sandboxed Execution Tool (Pre-loaded with df, pd, np, plt, sns)
         stdout_capture = io.StringIO()
-        local_env = {"df": df.copy(), "pd": pd, "plt": plt}
+        local_env = {"df": df.copy(), "pd": pd, "np": np, "plt": plt, "sns": sns}
         
         try:
             with contextlib.redirect_stdout(stdout_capture):
                 exec(code_to_run, local_env)
             
             exec_success = True
-            stdout_result = local_env.get("result", stdout_capture.getvalue())
+            stdout_val = stdout_capture.getvalue().strip()
+            result_val = local_env.get("result", None)
+            stdout_result = result_val if result_val is not None else stdout_val
             with trace_container:
                 st.markdown(trace_msg(f"✅ Execution succeeded on run #{retry_count + 1}.", "success"), unsafe_allow_html=True)
         except Exception as e:
@@ -325,13 +332,14 @@ Execution Output:
 {stdout_result}
 
 Synthesize these computational findings into a clear, executive-ready insight summary with bullet points.
-AESTHETIC RULE: Ensure proper spacing when using Markdown bolding around currency (e.g., write **$30,294.00** instead of squashing characters)."""
+AESTHETIC RULE: Ensure proper spacing when using Markdown bolding (e.g., write **30.39** instead of squashing characters)."""
 
         try:
             insight_response = client.chat.completions.create(
                 messages=[{"role": "user", "content": summary_prompt}],
                 model=llama_model,
-                temperature=0.2
+                temperature=0.2,
+                max_tokens=1024
             )
             executive_summary = insight_response.choices[0].message.content
         except RateLimitError:
@@ -341,7 +349,8 @@ AESTHETIC RULE: Ensure proper spacing when using Markdown bolding around currenc
             insight_response = client.chat.completions.create(
                 messages=[{"role": "user", "content": summary_prompt}],
                 model=llama_model,
-                temperature=0.2
+                temperature=0.2,
+                max_tokens=1024
             )
             executive_summary = insight_response.choices[0].message.content
         
