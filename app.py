@@ -58,7 +58,7 @@ st.markdown("""
         box-shadow: none !important; 
     }
     
-    /* FIX: + CSV Popover Button Override (White background, Brown Text/Icon) */
+    /* FIX: + File Popover Button Override (White background, Brown Text/Icon) */
     div[data-testid="stPopover"] > button {
         background-color: #FFFFFF !important; 
         border: 2px solid #8C6246 !important; 
@@ -119,8 +119,9 @@ with st.sidebar:
     st.markdown("---")
     
     st.markdown("#### Dataset Selector")
-    uploaded_file_sidebar = st.file_uploader("Upload CSV", type=["csv"], key="sidebar_upload")
+    uploaded_file_sidebar = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"], key="sidebar_upload")
     
+    sheet_selector_placeholder = st.empty()
     active_file_placeholder = st.empty()
 
 # ---------------------------------------------------------
@@ -167,11 +168,11 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ---------------------------------------------------------
 st.markdown("**Enter your analytical question or task:**")
 
-col_btn, col_prompt, col_exec = st.columns([1, 7, 2])
+col_btn, col_prompt, col_exec = st.columns([1.2, 6.8, 2])
 
 with col_btn:
-    with st.popover("➕ CSV"):
-        uploaded_file_main = st.file_uploader("Upload Data", type=["csv"], label_visibility="collapsed", key="main_upload")
+    with st.popover("➕ File"):
+        uploaded_file_main = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"], label_visibility="collapsed", key="main_upload")
 
 with col_prompt:
     user_query = st.text_input("Prompt", placeholder="Type your prompt here... (e.g., What is our total revenue per product category?)", label_visibility="collapsed")
@@ -180,16 +181,29 @@ with col_exec:
     run_pressed = st.button("Execute Agent")
 
 # ---------------------------------------------------------
-# Resolve Active Dataset & Render Sidebar Sync Card
+# Resolve Active Dataset (CSV or XLSX) & Render Sidebar Card
 # ---------------------------------------------------------
 uploaded_file = uploaded_file_main or uploaded_file_sidebar
 
 if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
+    file_name = uploaded_file.name
+    if file_name.lower().endswith(".xlsx"):
+        excel_file = pd.ExcelFile(uploaded_file)
+        if len(excel_file.sheet_names) > 1:
+            selected_sheet = sheet_selector_placeholder.selectbox("Select Excel Sheet:", excel_file.sheet_names)
+            df = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
+            display_name = f"{file_name} ({selected_sheet})"
+        else:
+            df = pd.read_excel(uploaded_file)
+            display_name = file_name
+    else:
+        df = pd.read_csv(uploaded_file)
+        display_name = file_name
+
     active_file_placeholder.markdown(f"""
     <div style="background-color: #EAE0D5; padding: 14px; border-radius: 8px; border-left: 5px solid #8C6246; margin-top: 15px;">
         <p style="margin: 0; font-size: 11px; color: #5C4033; font-weight: 800; font-family: 'Montserrat', sans-serif; text-transform: uppercase;">Active Dataset</p>
-        <p style="margin: 5px 0 0 0; font-size: 14px; color: #2D231E; font-weight: 700; font-family: 'Merriweather', serif;">📄 {uploaded_file.name}</p>
+        <p style="margin: 5px 0 0 0; font-size: 14px; color: #2D231E; font-weight: 700; font-family: 'Merriweather', serif;">📄 {display_name}</p>
     </div>
     """, unsafe_allow_html=True)
 else:
@@ -244,7 +258,7 @@ if run_pressed:
         
         error_context = ""
         if error_trace:
-            error_context = f"\nCRITICAL: Your previous code crashed with this traceback:\n{error_trace}\nFix the root cause completely. Remember: `df` is ALREADY loaded in memory. Do NOT call `pd.read_csv()`."
+            error_context = f"\nCRITICAL: Your previous code crashed with this traceback:\n{error_trace}\nFix the root cause completely. Remember: `df` is ALREADY loaded in memory. Do NOT call `pd.read_csv()` or `pd.read_excel()`."
 
         prompt = f"""You are an elite data scientist and Python programmer working on a pandas DataFrame named `df` that is ALREADY loaded in memory.
 Dataset Schema & Sample:
@@ -254,7 +268,7 @@ User Task: "{user_query}"
 {error_context}
 
 STRICT INSTRUCTIONS:
-1. NEVER call `pd.read_csv()` or load any external file. The data is ALREADY in the variable `df`.
+1. NEVER call `pd.read_csv()` or `pd.read_excel()` or load any external file. The data is ALREADY in the variable `df`.
 2. Clean non-numeric or missing values (like 'Absent', '$', commas) using `pd.to_numeric(..., errors='coerce')` before math operations.
 3. Store the final formatted textual summary (or dictionary/DataFrame of all requested metrics) in a variable named `result`, AND also `print(result)`.
 4. If a visualization is requested or helpful, create it using `matplotlib.pyplot as plt` or `seaborn as sns` and save it to '{generated_chart_path}' using `plt.savefig('{generated_chart_path}', bbox_inches='tight')` followed by `plt.close()`. Do NOT call `plt.show()`.
